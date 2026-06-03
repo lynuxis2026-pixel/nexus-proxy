@@ -5,6 +5,15 @@ High-level summary of each release. Full, commit-level notes are on the
 
 ## Unreleased
 
+- **Playground (chat UI):** a new "💬 Playground" overlay in the dashboard. Pick
+  any model from any configured provider (Claude Opus, GPT-4o, DeepSeek, Groq,
+  …), type a question, watch the answer stream back in real time. Every
+  Playground call flows through the normal proxy pipeline so cache, cascade,
+  privacy firewall and cost tracking apply for free, and the call shows up in
+  the live feed. Streaming via `fetch` + `ReadableStream`, Anthropic SSE
+  format. New endpoints `GET /api/playground/models` and
+  `POST /api/playground/chat`. Five backend tests; verified end-to-end on the
+  running binary.
 - **First-run setup wizard:** open the dashboard after a fresh install and a
   4-step in-browser onboarding takes over (Welcome → Providers → Test → Connect).
   Auto-detects providers already in your env vars, recommends a sensible starter

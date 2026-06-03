@@ -91,6 +91,80 @@
 
   function copyText(t: string) { navigator.clipboard?.writeText(t) }
 
+  // ── Playground ──
+  type PgModel = { provider: string; tier: string; model: string; label: string }
+  type Turn = { role: 'user' | 'assistant'; content: string }
+  let pgOpen = false
+  let pgModels: PgModel[] = []
+  let pgSelected = ''
+  let pgTurns: Turn[] = []
+  let pgInput = ''
+  let pgStreaming = false
+  let pgErr = ''
+
+  async function pgLoadModels() {
+    try {
+      const r = await fetch('/api/playground/models')
+      const j = await r.json()
+      pgModels = j.models || []
+      if (pgModels.length && !pgSelected) pgSelected = pgModels[0].model
+    } catch (e) { pgErr = String(e) }
+  }
+  function pgOpenChat() { pgOpen = true; pgLoadModels() }
+  function pgClose() { pgOpen = false }
+
+  async function pgSend() {
+    if (!pgInput.trim() || pgStreaming || !pgSelected) return
+    const userTurn: Turn = { role: 'user', content: pgInput.trim() }
+    pgTurns = [...pgTurns, userTurn, { role: 'assistant', content: '' }]
+    pgInput = ''; pgStreaming = true; pgErr = ''
+    const sel = pgModels.find(m => m.model === pgSelected)
+    const payload = {
+      model: pgSelected,
+      max_tokens: 4096,
+      messages: pgTurns.filter(t => t.content || t.role === 'user').slice(0, -1).map(t => ({ role: t.role, content: t.content })),
+    }
+    try {
+      const resp = await fetch('/api/playground/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(sel ? { 'X-Nexus-Provider': sel.provider } : {}),
+        },
+        body: JSON.stringify(payload),
+      })
+      if (!resp.ok || !resp.body) { pgErr = `HTTP ${resp.status}`; pgStreaming = false; return }
+      const reader = resp.body.getReader()
+      const dec = new TextDecoder()
+      let buf = ''
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buf += dec.decode(value, { stream: true })
+        let nl: number
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl); buf = buf.slice(nl + 1)
+          if (!line.startsWith('data:')) continue
+          const data = line.slice(5).trim()
+          if (!data || data === '[DONE]') continue
+          try {
+            const evt = JSON.parse(data)
+            const delta = evt?.delta?.text ?? evt?.delta?.content ?? evt?.content_block?.text ?? ''
+            if (delta) {
+              pgTurns[pgTurns.length - 1].content += delta
+              pgTurns = pgTurns
+            }
+          } catch { /* tolerate non-JSON keep-alive events */ }
+        }
+      }
+    } catch (e) { pgErr = String(e) }
+    pgStreaming = false
+  }
+  function pgKey(e: KeyboardEvent) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); pgSend() }
+  }
+  function pgReset() { pgTurns = []; pgErr = '' }
+
   // ── Request inspector + replay ──
   let inspecting: any = null
   let inspectLoading = false
@@ -303,10 +377,63 @@
 
 <header>
   <h1>NE<span>X</span>US</h1>
-  <div class="status" class:live={$connected}>
-    <span class="dot"></span>{$connected ? 'live' : 'connecting'}
+  <div class="header-right">
+    <button class="pg-open" on:click={pgOpenChat} title="Pick any model and chat with it">💬 Playground</button>
+    <div class="status" class:live={$connected}>
+      <span class="dot"></span>{$connected ? 'live' : 'connecting'}
+    </div>
   </div>
 </header>
+
+{#if pgOpen}
+  <div class="pg-bg" role="presentation" on:click={pgClose}>
+    <div class="pg-card" role="dialog" aria-modal="true" on:click|stopPropagation on:keydown|stopPropagation>
+      <div class="pg-head">
+        <div class="pg-title">
+          <b>💬 Playground</b>
+          <span class="muted">— pick a model, chat with it through NEXUS</span>
+        </div>
+        <div class="pg-controls">
+          <select class="pg-select" bind:value={pgSelected} disabled={pgStreaming}>
+            {#each pgModels as m (m.provider + '/' + m.model)}
+              <option value={m.model}>{m.label}</option>
+            {/each}
+            {#if pgModels.length === 0}
+              <option value="">no providers configured — run the setup wizard</option>
+            {/if}
+          </select>
+          <button class="pg-ghost small" on:click={pgReset} disabled={pgStreaming || pgTurns.length === 0}>Clear</button>
+          <button class="x" on:click={pgClose}>✕</button>
+        </div>
+      </div>
+
+      <div class="pg-feed">
+        {#if pgTurns.length === 0}
+          <div class="pg-empty">
+            <div class="pg-empty-title">No messages yet</div>
+            <div class="pg-empty-sub">Pick a model above, type something below. Streamed through NEXUS — every request is logged + costed in your dashboard.</div>
+          </div>
+        {/if}
+        {#each pgTurns as t, i (i)}
+          <div class="pg-turn" class:user={t.role === 'user'} class:assistant={t.role === 'assistant'}>
+            <div class="pg-who">{t.role === 'user' ? 'you' : (pgModels.find(m => m.model === pgSelected)?.provider || 'assistant')}</div>
+            <div class="pg-body">{t.content || (pgStreaming && i === pgTurns.length - 1 ? '…' : '')}</div>
+          </div>
+        {/each}
+        {#if pgErr}
+          <div class="pg-err">⚠ {pgErr}</div>
+        {/if}
+      </div>
+
+      <div class="pg-input">
+        <textarea bind:value={pgInput} on:keydown={pgKey} rows="2" placeholder="Type a message — Enter to send, Shift+Enter for a new line" disabled={pgStreaming || !pgSelected}></textarea>
+        <button class="pg-send" on:click={pgSend} disabled={pgStreaming || !pgInput.trim() || !pgSelected}>
+          {pgStreaming ? 'Streaming…' : 'Send →'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <main>
   {#if $savings.saved_usd > 0}
@@ -603,4 +730,38 @@
   .hint { color: #94a3b8; font-size: 12px; line-height: 1.55; padding: 10px 12px; background: #11182f; border: 1px solid #1a2035; border-radius: 7px; }
   .hint code { color: #06b6d4; }
   .setup-done { text-align: center; padding: 60px 0; font-size: 20px; color: #10b981; font-weight: 700; }
+
+  /* ── Playground ── */
+  .header-right { display: flex; align-items: center; gap: 16px; }
+  .pg-open { background: linear-gradient(90deg, #7c3aed, #06b6d4); color: #fff; border: 0; border-radius: 7px; padding: 7px 14px; font-size: 12px; font-weight: 700; cursor: pointer; letter-spacing: 0.02em; }
+  .pg-open:hover { filter: brightness(1.1); }
+  .pg-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; padding: 24px; z-index: 90; }
+  .pg-card { background: #0a0e1a; border: 1px solid #1a2035; border-radius: 12px; width: 100%; max-width: 880px; height: 78vh; display: flex; flex-direction: column; box-shadow: 0 30px 80px -20px rgba(124,58,237,0.3); }
+  .pg-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid #1a2035; gap: 10px; flex-wrap: wrap; }
+  .pg-title { font-size: 13px; color: #e2e8f0; }
+  .pg-title .muted { color: #64748b; margin-left: 6px; }
+  .pg-controls { display: flex; align-items: center; gap: 8px; }
+  .pg-select { background: #050816; color: #e2e8f0; border: 1px solid #1a2035; border-radius: 6px; padding: 6px 10px; font-size: 12px; font-family: 'Geist Mono', monospace; min-width: 230px; }
+  .pg-select:focus { outline: none; border-color: #7c3aed; }
+  .pg-ghost { background: transparent; color: #94a3b8; border: 1px solid #1a2035; border-radius: 6px; padding: 6px 11px; cursor: pointer; font-size: 12px; }
+  .pg-ghost:hover { color: #e2e8f0; border-color: #2a2150; }
+  .pg-ghost.small { padding: 5px 10px; font-size: 11px; }
+  .pg-feed { flex: 1; overflow-y: auto; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+  .pg-empty { text-align: center; color: #64748b; padding: 50px 24px; }
+  .pg-empty-title { font-size: 15px; color: #94a3b8; margin-bottom: 6px; font-weight: 600; }
+  .pg-empty-sub { font-size: 12px; line-height: 1.55; max-width: 460px; margin: 0 auto; }
+  .pg-turn { display: flex; flex-direction: column; gap: 4px; }
+  .pg-turn .pg-who { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: #64748b; }
+  .pg-turn.user .pg-who { color: #06b6d4; }
+  .pg-turn.assistant .pg-who { color: #7c3aed; }
+  .pg-body { background: #11182f; border: 1px solid #1a2035; border-radius: 8px; padding: 10px 13px; color: #e2e8f0; font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+  .pg-turn.user .pg-body { background: #050816; }
+  .pg-err { color: #ef4444; font-size: 12px; padding: 8px 12px; background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.25); border-radius: 7px; }
+  .pg-input { display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 14px 18px; border-top: 1px solid #1a2035; }
+  .pg-input textarea { background: #050816; color: #e2e8f0; border: 1px solid #1a2035; border-radius: 7px; padding: 9px 12px; font-size: 13px; font-family: 'Inter', sans-serif; resize: none; line-height: 1.5; }
+  .pg-input textarea:focus { outline: none; border-color: #7c3aed; }
+  .pg-input textarea:disabled { opacity: 0.5; }
+  .pg-send { background: #7c3aed; color: #fff; border: 0; border-radius: 7px; padding: 0 18px; font-size: 13px; font-weight: 700; cursor: pointer; min-width: 100px; }
+  .pg-send:hover { background: #6d28d9; }
+  .pg-send:disabled { opacity: 0.5; cursor: default; }
 </style>

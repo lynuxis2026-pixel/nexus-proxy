@@ -76,6 +76,10 @@ func (s *Server) Routes() http.Handler {
 	api.HandleFunc("/setup/test", s.handleSetupTest).Methods("POST")
 	api.HandleFunc("/setup/save", s.handleSetupSave).Methods("POST")
 
+	// Playground: pick any configured model, chat with it through the proxy.
+	api.HandleFunc("/playground/models", s.handlePlaygroundModels).Methods("GET")
+	api.HandleFunc("/playground/chat", s.handlePlaygroundChat).Methods("POST")
+
 	// Serve the embedded dashboard UI (Svelte build, or the committed fallback).
 	if sub, err := distFileSystem(); err == nil {
 		r.PathPrefix("/").Handler(http.FileServer(http.FS(sub)))
